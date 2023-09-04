@@ -1,0 +1,175 @@
+// 1) Tabla país
+var table = ee.FeatureCollection("USDOS/LSIB_SIMPLE/2017")
+.filter(ee.Filter.eq('country_co', 'CO'));
+print("colombia",table);
+Map.addLayer(table, {} , 'Colombia');
+Map.centerObject(table, 5);
+
+// 2) Información luces nocturnas periodos análisis
+var nl2019col = ee.ImageCollection("NOAA/VIIRS/DNB/MONTHLY_V1/VCMCFG")
+                .filterBounds(table)
+                .filterDate('2019-01-01', '2019-12-31')
+                .select('avg_rad');
+ 
+var nl2020col = ee.ImageCollection("NOAA/VIIRS/DNB/MONTHLY_V1/VCMCFG")
+                .filterBounds(table)
+                .filterDate('2020-01-01', '2020-12-31')
+                .select('avg_rad'); 
+                
+//Define variable que colapsa a la mediana anual
+var nl2019 = nl2019col.reduce(ee.Reducer.median());
+var nl2020 = nl2020col.reduce(ee.Reducer.median());
+
+//Define variable diferencia
+var nlDiff = nl2020.subtract(nl2019)
+
+//Hace masking
+nl2019 = nl2019.updateMask(nl2019.gt(1));
+nl2020 = nl2020.updateMask(nl2020.gt(1));
+nlDiff = nlDiff.updateMask(nlDiff.gt(1));
+
+// 3) Parámetros visualización
+var Vis = {
+  min: 0.0,
+  max: 80.0,
+  palette: ['3907ff', '03fff3', '28ff25', 'fbff09', 'ff1105'],
+};
+var Vis2 = {
+  min: 0.0,
+  max: 5.0,
+  palette: ['3907ff', '03fff3', '28ff25', 'fbff09', 'ff1105'],
+};
+
+// 4) Visualiza mapas básicos
+
+Map.addLayer(nl2019,Vis , 'luces_2019');
+Map.addLayer(nl2020,Vis , 'luces_2020');
+Map.addLayer(nlDiff,Vis2 , 'diff');
+
+// 5) Definición variable para evaluar niveles de crecimiento
+
+//Ver el promedio de la diferencia
+var nlDiff_mean = nlDiff.reduceRegion({
+  reducer: ee.Reducer.mean(),
+  geometry:table,
+  scale: 10000,
+  bestEffort: true
+});
+print(nlDiff_mean);
+// Ver los cuartiles de la diferencia
+var nlDiff_perc = nlDiff.reduceRegion({
+  reducer: ee.Reducer.percentile([25, 50, 75, 100]),
+  geometry: table,
+  scale: 10000,
+  bestEffort: true
+});
+print(nlDiff_perc);
+
+var q1=ee.Number(nlDiff_perc.get("avg_rad_median_p25"));
+var q2=ee.Number(nlDiff_perc.get("avg_rad_median_p50"));
+var q3=ee.Number(nlDiff_perc.get("avg_rad_median_p75"));
+var q4=ee.Number(nlDiff_perc.get("avg_rad_median_p100"));
+
+
+
+
+//Definir variable categórica para niveles de diferencia: los umbrales son los cuartiles q1, q2 y q3
+var zones = nlDiff.gt(1.4539).add(nlDiff.gt(2.85425)).add(nlDiff.gt(4.11802));
+zones = zones.updateMask(zones.neq(0));
+
+//Cambiar el sistema de coordenadas a Magna Colombia Bogotá
+var zones_1 = zones.reproject({
+  crs: 'EPSG:3116', // Proyección Magna Bogotá Colombia
+  scale: 1000, // Resolución espacial en metros
+});
+
+// Convertir zones (que es una imagen) a vectores
+
+/*var vectors = zones_1.addBands(zones).reduceToVectors({
+  geometry: table,
+  crs: zones.projection(),
+  scale: 1000,
+  geometryType: 'polygon',
+  eightConnected: false,
+  labelProperty: 'zone',
+  reducer: ee.Reducer.mean()
+});*/
+
+
+// Convertir la imagen raster a vectorial
+var vectors = zones_1.addBands(zones_1).reduceToVectors({
+  geometry: table, // Área de interés donde se realiza la conversión
+  crs: 'EPSG:3116', // Proyección Magna Bogotá Colombia
+  scale: 1000, // Resolución espacial en metros
+  geometryType: 'polygon',
+  eightConnected: false,
+  labelProperty: 'zone',
+  reducer: ee.Reducer.mean()
+});
+
+
+// Visualizar las zonas de acuerdo con los umbrales.
+Map.addLayer(zones.clip(table), {min: 0, max: 2, palette: ['3907ff','0000FF', '00FF00', 'FF0000']}, 'raster');
+// Make a display image for the vectors, add it to the map.
+var display = ee.Image(0).updateMask(0).paint(vectors, '000000', 3);
+Map.addLayer(display.clip(table), {palette: '000000'}, 'vectors');
+
+// 6) Exporta los resultados
+
+
+// Exportar el raster 'zones' que contiene la categorización de los píxeles según aumento radiación
+Export.image.toDrive({
+  image: zones.clip(table).visualize(Vis2),
+  description: 'luces_19-20',
+  region: table,
+  maxPixels: 1e10,
+  scale: 1000
+});
+
+
+
+
+// Exporta el shape
+Export.table.toDrive({
+  collection: vectors,
+  description: 'OLS_19-20_SHP',
+  fileFormat: 'SHP'
+});
+
+
+
+// Exportar tabla
+/*var means = zones.reduceRegions({
+  collection: table,
+  reducer: ee.Reducer.sum(),
+  scale: 30,
+});
+print(ee.Feature(means.first()));
+
+Export.table.toDrive({
+  collection: means,
+  description: 'urbanization',
+  fileFormat: 'CSV'
+});*/
+
+
+
+// Visualiza los histogramas del cambio en las luces
+var histogram_diff =
+    ui.Chart.image.histogram({image: zones, region: table, scale: 1000})
+        .setSeriesNames(['Categoría'])
+        .setOptions({
+          title: 'Distribución de la diferencia en la radiación 2019-2020',
+          hAxis: {
+            title: 'Aumento en la radiación',
+            titleTextStyle: {italic: false, bold: true},
+            //viewWindow: {min: 0, max: 4},
+          },
+          vAxis:
+              {title: 'Count', titleTextStyle: {italic: false, bold: true}},
+          colors: ['696969']
+        });
+
+print(histogram_diff)
+
+
